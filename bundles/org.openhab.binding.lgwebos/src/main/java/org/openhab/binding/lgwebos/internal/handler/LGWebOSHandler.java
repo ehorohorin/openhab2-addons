@@ -17,6 +17,7 @@ import static org.openhab.binding.lgwebos.internal.LGWebOSBindingConstants.*;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
@@ -33,15 +34,17 @@ import org.eclipse.smarthome.core.thing.binding.BaseThingHandler;
 import org.eclipse.smarthome.core.thing.binding.ThingHandlerService;
 import org.eclipse.smarthome.core.types.Command;
 import org.eclipse.smarthome.core.types.State;
+import org.eclipse.smarthome.core.types.StateOption;
 import org.openhab.binding.lgwebos.action.LGWebOSActions;
 import org.openhab.binding.lgwebos.internal.ChannelHandler;
 import org.openhab.binding.lgwebos.internal.LGWebOSBindingConstants;
+import org.openhab.binding.lgwebos.internal.LGWebOSStateDescriptionOptionProvider;
 import org.openhab.binding.lgwebos.internal.LauncherApplication;
 import org.openhab.binding.lgwebos.internal.MediaControlPlayer;
 import org.openhab.binding.lgwebos.internal.MediaControlStop;
 import org.openhab.binding.lgwebos.internal.PowerControlPower;
+import org.openhab.binding.lgwebos.internal.RCButtonControl;
 import org.openhab.binding.lgwebos.internal.TVControlChannel;
-import org.openhab.binding.lgwebos.internal.TVControlChannelName;
 import org.openhab.binding.lgwebos.internal.ToastControlToast;
 import org.openhab.binding.lgwebos.internal.VolumeControlMute;
 import org.openhab.binding.lgwebos.internal.VolumeControlVolume;
@@ -66,6 +69,8 @@ public class LGWebOSHandler extends BaseThingHandler implements LGWebOSTVSocket.
     private static final int RECONNECT_INTERVAL_SECONDS = 10;
     private static final int RECONNECT_START_UP_DELAY_SECONDS = 0;
 
+    private static final String APP_ID_LIVETV = "com.webos.app.livetv";
+
     /*
      * error messages
      */
@@ -77,28 +82,33 @@ public class LGWebOSHandler extends BaseThingHandler implements LGWebOSTVSocket.
     private final Map<String, ChannelHandler> channelHandlers;
 
     private final LauncherApplication appLauncher = new LauncherApplication();
+
     private @Nullable LGWebOSTVSocket socket;
     private final WebSocketClient webSocketClient;
+
+    private final LGWebOSStateDescriptionOptionProvider stateDescriptionProvider;
 
     private @Nullable ScheduledFuture<?> reconnectJob;
     private @Nullable ScheduledFuture<?> keepAliveJob;
 
     private @Nullable LGWebOSConfiguration config;
 
-    public LGWebOSHandler(Thing thing, WebSocketClient webSocketClient) {
+    public LGWebOSHandler(Thing thing, WebSocketClient webSocketClient,
+            LGWebOSStateDescriptionOptionProvider stateDescriptionProvider) {
         super(thing);
         this.webSocketClient = webSocketClient;
+        this.stateDescriptionProvider = stateDescriptionProvider;
 
         Map<String, ChannelHandler> handlers = new HashMap<>();
         handlers.put(CHANNEL_VOLUME, new VolumeControlVolume());
         handlers.put(CHANNEL_POWER, new PowerControlPower());
         handlers.put(CHANNEL_MUTE, new VolumeControlMute());
         handlers.put(CHANNEL_CHANNEL, new TVControlChannel());
-        handlers.put(CHANNEL_CHANNEL_NAME, new TVControlChannelName());
         handlers.put(CHANNEL_APP_LAUNCHER, appLauncher);
         handlers.put(CHANNEL_MEDIA_STOP, new MediaControlStop());
         handlers.put(CHANNEL_TOAST, new ToastControlToast());
         handlers.put(CHANNEL_MEDIA_PLAYER, new MediaControlPlayer());
+        handlers.put(CHANNEL_RCBUTTON, new RCButtonControl());
         channelHandlers = Collections.unmodifiableMap(handlers);
     }
 
@@ -113,6 +123,7 @@ public class LGWebOSHandler extends BaseThingHandler implements LGWebOSTVSocket.
 
     @Override
     public void initialize() {
+        logger.debug("Initializing handler for thing {}", getThing().getUID());
         LGWebOSConfiguration c = getLGWebOSConfig();
         logger.trace("Handler initialized with config {}", c);
         String host = c.getHost();
@@ -125,20 +136,24 @@ public class LGWebOSHandler extends BaseThingHandler implements LGWebOSTVSocket.
         s.setListener(this);
         socket = s;
 
+        updateStatus(ThingStatus.OFFLINE, ThingStatusDetail.NONE, "TV is off");
+
         startReconnectJob();
     }
 
     @Override
     public void dispose() {
+        logger.debug("Disposing handler for thing {}", getThing().getUID());
         stopKeepAliveJob();
         stopReconnectJob();
 
         LGWebOSTVSocket s = socket;
         if (s != null) {
             s.setListener(null);
-            scheduler.execute(() -> s.disconnect()); // dispose should be none-blocking
+            s.disconnect();
         }
         socket = null;
+        config = null; // ensure config gets actually refreshed during re-initialization
         super.dispose();
     }
 
@@ -227,17 +242,21 @@ public class LGWebOSHandler extends BaseThingHandler implements LGWebOSTVSocket.
 
     @Override
     public void storeKey(@Nullable String key) {
-        // store it current configuration and avoiding complete re-initialization via handleConfigurationUpdate
-        getLGWebOSConfig().key = key;
+        if (!getKey().equals(key)) {
+            logger.debug("store new key");
+            // store it current configuration and avoiding complete re-initialization via handleConfigurationUpdate
+            getLGWebOSConfig().key = key;
 
-        // persist the configuration change
-        Configuration configuration = editConfiguration();
-        configuration.put(LGWebOSBindingConstants.CONFIG_KEY, key);
-        updateConfiguration(configuration);
+            // persist the configuration change
+            Configuration configuration = editConfiguration();
+            configuration.put(LGWebOSBindingConstants.CONFIG_KEY, key);
+            updateConfiguration(configuration);
+        }
     }
 
     @Override
     public void storeProperties(Map<String, String> properties) {
+        logger.debug("storeProperties {}", properties);
         Map<String, String> map = editProperties();
         map.putAll(properties);
         updateProperties(map);
@@ -256,19 +275,26 @@ public class LGWebOSHandler extends BaseThingHandler implements LGWebOSTVSocket.
                 stopKeepAliveJob();
                 startReconnectJob();
                 break;
-
-            case REGISTERING:
+            case CONNECTING:
                 stopReconnectJob();
-                startKeepAliveJob();
+                break;
+            case REGISTERING:
                 updateStatus(ThingStatus.ONLINE, ThingStatusDetail.NONE,
                         "Registering - You may need to confirm pairing on TV.");
                 break;
             case REGISTERED:
+                startKeepAliveJob();
                 updateStatus(ThingStatus.ONLINE, ThingStatusDetail.NONE, "Connected");
+
                 channelHandlers.forEach((k, v) -> {
-                    v.refreshSubscription(k, this);
+                    // refresh subscriptions except on channel, which can only be subscribe in livetv app. see
+                    // postUpdate method
+                    if (!CHANNEL_CHANNEL.equals(k)) {
+                        v.refreshSubscription(k, this);
+                    }
                     v.onDeviceReady(k, this);
                 });
+
                 break;
 
         }
@@ -282,6 +308,7 @@ public class LGWebOSHandler extends BaseThingHandler implements LGWebOSTVSocket.
         switch (getSocket().getState()) {
             case DISCONNECTED:
                 break;
+            case CONNECTING:
             case REGISTERING:
             case REGISTERED:
                 updateStatus(ThingStatus.OFFLINE, ThingStatusDetail.COMMUNICATION_ERROR, "Connection Failed: " + error);
@@ -289,37 +316,20 @@ public class LGWebOSHandler extends BaseThingHandler implements LGWebOSTVSocket.
         }
     }
 
+    public void setOptions(String channelId, List<StateOption> options) {
+        logger.debug("setOptions channelId={} options.size()={}", channelId, options.size());
+        stateDescriptionProvider.setStateOptions(new ChannelUID(getThing().getUID(), channelId), options);
+    }
+
     public void postUpdate(String channelId, State state) {
-        updateState(channelId, state);
-    }
-
-    public boolean isChannelInUse(String channelId) {
-        return isLinked(channelId);
-    }
-
-    // channel linking modifications
-
-    @Override
-    public void channelLinked(ChannelUID channelUID) {
-        refreshChannelSubscription(channelUID);
-    }
-
-    @Override
-    public void channelUnlinked(ChannelUID channelUID) {
-        refreshChannelSubscription(channelUID);
-    }
-
-    /**
-     * Refresh channel subscription for one specific channel.
-     *
-     * @param channelUID must not be <code>null</code>
-     */
-    private void refreshChannelSubscription(ChannelUID channelUID) {
-        String channelId = channelUID.getId();
-        if (getSocket().isConnected()) {
-            channelHandlers.get(channelId).refreshSubscription(channelId, this);
+        if (isLinked(channelId)) {
+            updateState(channelId, state);
         }
 
+        // channel subscription only works when on livetv app.
+        if (CHANNEL_APP_LAUNCHER.equals(channelId) && APP_ID_LIVETV.equals(state.toString())) {
+            channelHandlers.get(CHANNEL_CHANNEL).refreshSubscription(CHANNEL_CHANNEL, this);
+        }
     }
 
     @Override

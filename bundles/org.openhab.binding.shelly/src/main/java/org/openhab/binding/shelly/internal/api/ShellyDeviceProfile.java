@@ -14,7 +14,7 @@ package org.openhab.binding.shelly.internal.api;
 
 import static org.openhab.binding.shelly.internal.ShellyBindingConstants.SHELLYDT_DIMMER;
 import static org.openhab.binding.shelly.internal.ShellyUtils.*;
-import static org.openhab.binding.shelly.internal.api.ShellyApiJson.*;
+import static org.openhab.binding.shelly.internal.api.ShellyApiJsonDTO.*;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -25,7 +25,7 @@ import org.eclipse.jdt.annotation.NonNullByDefault;
 import org.eclipse.jdt.annotation.Nullable;
 import org.openhab.binding.shelly.internal.ShellyBindingConstants;
 import org.openhab.binding.shelly.internal.ShellyUtils;
-import org.openhab.binding.shelly.internal.api.ShellyApiJson.ShellySettingsGlobal;
+import org.openhab.binding.shelly.internal.api.ShellyApiJsonDTO.ShellySettingsGlobal;
 
 import com.google.gson.Gson;
 
@@ -74,7 +74,7 @@ public class ShellyDeviceProfile {
     public Boolean isSensor = false; // true for HT & Smoke
     public Boolean isSmoke = false; // true for Smoke
 
-    public Map<String, String> irCodes = new HashMap<String, String>(); // Sense: list of stored IR codes
+    public Map<String, String> irCodes = new HashMap<>(); // Sense: list of stored IR codes
 
     public Boolean supportsButtonUrls = false; // true if the btn_xxx urls are supported
     public Boolean supportsOutUrls = false; // true if the out_xxx urls are supported
